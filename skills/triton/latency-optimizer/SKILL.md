@@ -115,29 +115,30 @@ kernel[grid](...)  # 未传入 multibuffer、unit_flag
 
 ---
 
-### 优化点 4：Libdevice 函数使用
+### 优化点 4：离散访存优化
 
-**适用条件**：代码中存在手动实现的数学函数，而 `tl.extra.cann.libdevice` 中已有优化版本
+**适用条件**：代码中存在通过随机/不可预测索引访问全局内存
 
 **典型代码特征**：
 ```python
-# 手动实现 round
-return (x + 0.5).to(tl.int8)
+# 索引来源于 tl.load 加载的值（随机性）
+idx = tl.load(indices_ptr + offset)  # idx 是运行时确定的随机值
+val = tl.load(data_ptr + idx)        # 通过随机索引访问
 
-# 手动实现 relu
-out = tl.maximum(x, 0.0)
-
-# 手动实现 tanh、sinh、pow 等数学函数
+# 或者索引来源于 kernel 入参（可能是随机值）
+val = tl.load(ptr + random_index)
 ```
 
 **判断逻辑**：
-- 检查代码中是否手动实现了以下函数：round、trunc、relu、tanh、sinh、cosh、pow、atan、acos、asin、expm1、log1p、hypot 等
-- 如果存在手动实现且 `tl.extra.cann.libdevice` 中有对应函数 → 涉及
-- 如果代码中没有数学函数实现，或已使用 libdevice 版本 → 不涉及，跳过
+- 检查 `tl.load` 的索引来源：
+  - 如果索引是 `tl.program_id` 线性变换 → 确定性连续，不涉及
+  - 如果索引是循环变量线性变换 → 确定性步长，不涉及
+  - 如果索引来源于 `tl.load` 加载的值或 kernel 入参 → 潜在随机，涉及
+- 如果所有访存索引都是确定性连续/步长模式 → 不涉及，跳过
 
-**命中条件**：代码中存在手动实现的数学函数，且 libdevice 中有优化版本
+**命中条件**：代码中存在通过随机/不可预测索引访问全局内存
 
-**参考文档**：`references/libdevice-usage.md`
+**参考文档**：`references/discrete_memory_access.md`
 
 ---
 
@@ -244,30 +245,29 @@ for n in range(N):           # 64 次
 
 ---
 
-### 优化点 8：离散访存优化
+### 优化点 8：Libdevice 函数使用
 
-**适用条件**：代码中存在通过随机/不可预测索引访问全局内存
+**适用条件**：代码中存在手动实现的数学函数，而 `tl.extra.cann.libdevice` 中已有优化版本
 
 **典型代码特征**：
 ```python
-# 索引来源于 tl.load 加载的值（随机性）
-idx = tl.load(indices_ptr + offset)  # idx 是运行时确定的随机值
-val = tl.load(data_ptr + idx)        # 通过随机索引访问
+# 手动实现 round
+return (x + 0.5).to(tl.int8)
 
-# 或者索引来源于 kernel 入参（可能是随机值）
-val = tl.load(ptr + random_index)
+# 手动实现 relu
+out = tl.maximum(x, 0.0)
+
+# 手动实现 tanh、sinh、pow 等数学函数
 ```
 
 **判断逻辑**：
-- 检查 `tl.load` 的索引来源：
-  - 如果索引是 `tl.program_id` 线性变换 → 确定性连续，不涉及
-  - 如果索引是循环变量线性变换 → 确定性步长，不涉及
-  - 如果索引来源于 `tl.load` 加载的值或 kernel 入参 → 潜在随机，涉及
-- 如果所有访存索引都是确定性连续/步长模式 → 不涉及，跳过
+- 检查代码中是否手动实现了以下函数：round、trunc、relu、tanh、sinh、cosh、pow、atan、acos、asin、expm1、log1p、hypot 等
+- 如果存在手动实现且 `tl.extra.cann.libdevice` 中有对应函数 → 涉及
+- 如果代码中没有数学函数实现，或已使用 libdevice 版本 → 不涉及，跳过
 
-**命中条件**：代码中存在通过随机/不可预测索引访问全局内存
+**命中条件**：代码中存在手动实现的数学函数，且 libdevice 中有优化版本
 
-**参考文档**：`references/discrete_memory_access.md`
+**参考文档**：`references/libdevice-usage.md`
 
 ---
 
@@ -425,11 +425,11 @@ kernel[grid](..., BLOCK_M=128, BLOCK_N=128)
 | 入参静态化优化 | `references/constexpr_parameters.md` |
 | Tiling 优化 | `references/tiling_optimization.md` |
 | 分核优化 | `references/vector_core_partition.md` |
-| Libdevice 函数使用 | `references/libdevice-usage.md` |
+| 离散访存优化 | `references/discrete_memory_access.md` |
 | Scalar 转 Vector 优化 | `references/scalar_to_vector.md` |
 | Pass 合并优化 | `references/pass-merge.md` |
 | 维度合并优化 | `references/dimension-merge.md` |
-| 离散访存优化 | `references/discrete_memory_access.md` |
+| Libdevice 函数使用 | `references/libdevice-usage.md` |
 | 循环不变量外提 | `references/loop-invariant-hoisting.md` |
 | Load 指令重排序 | `references/load-order.md` |
 | BLOCK_SIZE 调优 | `references/block_size_tuning.md` |
