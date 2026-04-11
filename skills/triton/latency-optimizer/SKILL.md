@@ -51,7 +51,71 @@ def kernel(A, B, C, M, N,
 
 ---
 
-### 优化点 2：Libdevice 函数使用
+### 优化点 2：Tiling 优化（连续轴向量化）
+
+**适用条件**：处理多维张量（3D 及以上）的规约类或归一化算子，且规约轴并非内存布局中的最连续轴
+
+**典型代码特征**：
+```python
+@triton.jit
+def kernel(input_ptr, output_ptr, dim1, dim2, ...):
+    # 特征 1：向量化偏移 tl.arange 作用在非连续轴（如 dim1/M 轴）
+    m_offsets = tl.arange(0, BLOCK_SIZE_M)
+    # 特征 2：访存偏移计算中，向量化部分乘上了较大的 stride
+    input_offset = m_offsets * stride_m + n_idx * stride_n
+    # 特征 3：循环内部频繁进行还原操作（如 tl.sum）将向量压缩为标量
+    acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+    ...
+    total_sum = tl.sum(acc, axis=0)
+```
+
+**判断逻辑**：
+- 检查 `tl.load` 的偏移量计算：如果 `tl.arange` 产生的向量偏移量作用于 `stride > 1` 的轴，而存在 `stride = 1` 的轴仅被当作标量索引处理 → 涉及
+- 检查循环累加器：如果累加器在还原轴上分块，但访存模式导致了非连续内存读取 → 涉及
+- 如果 `tl.arange` 已经作用于内存最连续的轴（通常是最后一张量的最后一维），且实现了合并访存 → 不涉及，跳过
+
+**命中条件**：代码逻辑旨在对某维度进行还原，但其分块策略导致硬件执行了跨步访存
+
+**参考文档**：`references/tiling_optimization.md`
+
+---
+
+### 优化点 3：分核优化
+
+**适用条件**：代码中 Grid 大小设置不合理，或未充分利用 NPU 硬件资源
+
+**典型代码特征**：
+```python
+# 特征 1：Grid 远大于物理核数
+grid = (batch_size,)  # 如果 batch_size=128，远超 48 核
+
+# 特征 2：Grid 远小于物理核数
+grid = (batch_size // 64,)  # 如果 batch_size=128，只有 2 核
+
+# 特征 3：每个 program 只处理 1 行数据
+row_idx = tl.program_id(0)
+x = tl.load(ptr + row_idx * stride + cols, mask=mask)
+
+# 特征 4：未使用编译优化选项（multibuffer、unit_flag）
+kernel[grid](...)  # 未传入 multibuffer、unit_flag
+```
+
+**判断逻辑**：
+- 检查 Grid 大小是否接近物理核数（40-48）
+  - 如果 Grid >> 48 或 Grid << 48 → 涉及
+- 检查每个 program 处理的数据量
+  - 如果每个 program 只处理少量数据（如 1 行）→ 涉及
+- 检查是否使用了编译优化选项
+  - 如果未使用 multibuffer 且是内存密集型算子 → 涉及
+- 如果 Grid 合理且已使用优化选项 → 不涉及，跳过
+
+**命中条件**：代码中 Grid 大小设置不合理，或未充分利用 NPU 硬件资源
+
+**参考文档**：`references/vector_core_partition.md`
+
+---
+
+### 优化点 4：Libdevice 函数使用
 
 **适用条件**：代码中存在手动实现的数学函数，而 `tl.extra.cann.libdevice` 中已有优化版本
 
@@ -77,7 +141,7 @@ out = tl.maximum(x, 0.0)
 
 ---
 
-### 优化点 3：Scalar 转 Vector 优化
+### 优化点 5：Scalar 转 Vector 优化
 
 **适用条件**：代码中存在标量操作，可转换为向量操作以充分利用 NPU Vector 计算单元
 
@@ -119,7 +183,7 @@ d = a % b   # int 类型取余，退化为标量
 
 ---
 
-### 优化点 4：Pass 合并优化
+### 优化点 6：Pass 合并优化
 
 **适用条件**：代码中存在多次遍历相同数据计算不同统计量
 
@@ -153,7 +217,7 @@ for ...:
 
 ---
 
-### 优化点 5：维度合并优化
+### 优化点 7：维度合并优化
 
 **适用条件**：代码中存在多层嵌套循环处理连续维度，且维度间无依赖关系
 
@@ -180,36 +244,7 @@ for n in range(N):           # 64 次
 
 ---
 
-### 优化点 6：Tiling 优化（连续轴向量化）
-
-**适用条件**：处理多维张量（3D 及以上）的规约类或归一化算子，且规约轴并非内存布局中的最连续轴
-
-**典型代码特征**：
-```python
-@triton.jit
-def kernel(input_ptr, output_ptr, dim1, dim2, ...):
-    # 特征 1：向量化偏移 tl.arange 作用在非连续轴（如 dim1/M 轴）
-    m_offsets = tl.arange(0, BLOCK_SIZE_M)
-    # 特征 2：访存偏移计算中，向量化部分乘上了较大的 stride
-    input_offset = m_offsets * stride_m + n_idx * stride_n
-    # 特征 3：循环内部频繁进行还原操作（如 tl.sum）将向量压缩为标量
-    acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
-    ...
-    total_sum = tl.sum(acc, axis=0)
-```
-
-**判断逻辑**：
-- 检查 `tl.load` 的偏移量计算：如果 `tl.arange` 产生的向量偏移量作用于 `stride > 1` 的轴，而存在 `stride = 1` 的轴仅被当作标量索引处理 → 涉及
-- 检查循环累加器：如果累加器在还原轴上分块，但访存模式导致了非连续内存读取 → 涉及
-- 如果 `tl.arange` 已经作用于内存最连续的轴（通常是最后一张量的最后一维），且实现了合并访存 → 不涉及，跳过
-
-**命中条件**：代码逻辑旨在对某维度进行还原，但其分块策略导致硬件执行了跨步访存
-
-**参考文档**：`references/tiling_optimization.md`
-
----
-
-### 优化点 7：离散访存优化
+### 优化点 8：离散访存优化
 
 **适用条件**：代码中存在通过随机/不可预测索引访问全局内存
 
@@ -236,7 +271,7 @@ val = tl.load(ptr + random_index)
 
 ---
 
-### 优化点 8：循环不变量外提
+### 优化点 9：循环不变量外提
 
 **适用条件**：代码中存在嵌套循环，且内层循环中有只依赖外层变量的 `tl.load`
 
@@ -269,7 +304,7 @@ for block in range(num_blocks):
 
 ---
 
-### 优化点 9：Load 指令重排序
+### 优化点 10：Load 指令重排序
 
 **适用条件**：代码中存在循环，且循环内有多个 `tl.load` 和 `tl.store`，存在数据依赖导致的阻塞
 
@@ -301,41 +336,6 @@ for i in range(HEAD_NUM):
 **命中条件**：代码中存在循环，且有 load 指令可以通过重排序提前发射
 
 **参考文档**：`references/load-order.md`
-
----
-
-### 优化点 10：分核优化
-
-**适用条件**：代码中 Grid 大小设置不合理，或未充分利用 NPU 硬件资源
-
-**典型代码特征**：
-```python
-# 特征 1：Grid 远大于物理核数
-grid = (batch_size,)  # 如果 batch_size=128，远超 48 核
-
-# 特征 2：Grid 远小于物理核数
-grid = (batch_size // 64,)  # 如果 batch_size=128，只有 2 核
-
-# 特征 3：每个 program 只处理 1 行数据
-row_idx = tl.program_id(0)
-x = tl.load(ptr + row_idx * stride + cols, mask=mask)
-
-# 特征 4：未使用编译优化选项（multibuffer、unit_flag）
-kernel[grid](...)  # 未传入 multibuffer、unit_flag
-```
-
-**判断逻辑**：
-- 检查 Grid 大小是否接近物理核数（40-48）
-  - 如果 Grid >> 48 或 Grid << 48 → 涉及
-- 检查每个 program 处理的数据量
-  - 如果每个 program 只处理少量数据（如 1 行）→ 涉及
-- 检查是否使用了编译优化选项
-  - 如果未使用 multibuffer 且是内存密集型算子 → 涉及
-- 如果 Grid 合理且已使用优化选项 → 不涉及，跳过
-
-**命中条件**：代码中 Grid 大小设置不合理，或未充分利用 NPU 硬件资源
-
-**参考文档**：`references/vector_core_partition.md`
 
 ---
 
@@ -423,15 +423,15 @@ kernel[grid](..., BLOCK_M=128, BLOCK_N=128)
 | 文档类型 | 文档路径 |
 |----------|----------|
 | 入参静态化优化 | `references/constexpr_parameters.md` |
+| Tiling 优化 | `references/tiling_optimization.md` |
+| 分核优化 | `references/vector_core_partition.md` |
 | Libdevice 函数使用 | `references/libdevice-usage.md` |
 | Scalar 转 Vector 优化 | `references/scalar_to_vector.md` |
 | Pass 合并优化 | `references/pass-merge.md` |
 | 维度合并优化 | `references/dimension-merge.md` |
-| Tiling 优化 | `references/tiling_optimization.md` |
 | 离散访存优化 | `references/discrete_memory_access.md` |
 | 循环不变量外提 | `references/loop-invariant-hoisting.md` |
 | Load 指令重排序 | `references/load-order.md` |
-| 分核优化 | `references/vector_core_partition.md` |
 | BLOCK_SIZE 调优 | `references/block_size_tuning.md` |
 | Autotune 自动调优 | `references/autotune.md` |
 | 代码规范检查 | `references/checklist.md` |
