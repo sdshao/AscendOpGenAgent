@@ -12,3 +12,7 @@ output*
 build/
 extra-info/
 *.tar
+
+# ssd's personal files
+golden/
+official/
