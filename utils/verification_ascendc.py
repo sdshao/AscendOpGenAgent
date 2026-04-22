@@ -14,6 +14,77 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 WORKDIR = SCRIPT_DIR.parent
 
 
+# ---------------------------------------------------------------------------
+# 精度对比标准（参考 精度对比方法.md）
+# ---------------------------------------------------------------------------
+# dtype_str -> Threshold (MERE 通过阈值)
+PRECISION_THRESHOLDS = {
+    "float16": 2 ** -10,       # ≈ 9.77e-4
+    "bfloat16": 2 ** -7,       # ≈ 7.81e-3
+    "float32": 2 ** -13,       # ≈ 1.22e-4
+    "hifloat32": 2 ** -11,     # ≈ 4.88e-4
+    "float8_e4m3": 2 ** -3,    # ≈ 0.125
+    "float8_e5m2": 2 ** -2,    # ≈ 0.25
+}
+
+
+def _compute_mere(actual: torch.Tensor, golden: torch.Tensor, eps: float = 1e-7) -> float:
+    """计算平均相对误差 (Mean Relative Error).
+
+    MERE = mean(|actual - golden| / (|golden| + eps))
+    """
+    diff = (actual - golden).abs()
+    rel = diff / (golden.abs() + eps)
+    if rel.numel() == 0:
+        return 0.0
+    return float(rel.mean().item())
+
+
+def _compute_mare(actual: torch.Tensor, golden: torch.Tensor, eps: float = 1e-7) -> float:
+    """计算最大相对误差 (Max Relative Error).
+
+    MARE = max(|actual - golden| / (|golden| + eps))
+    """
+    diff = (actual - golden).abs()
+    rel = diff / (golden.abs() + eps)
+    if rel.numel() == 0:
+        return 0.0
+    return float(rel.max().item())
+
+
+def _get_threshold_for_tensor(t: torch.Tensor) -> float:
+    """根据张量 dtype 获取 MERE 阈值."""
+    dtype_map = {
+        torch.float16: "float16",
+        torch.bfloat16: "bfloat16",
+        torch.float32: "float32",
+    }
+    dtype_str = dtype_map.get(t.dtype)
+    if dtype_str is None:
+        # 非浮点类型使用一个宽松阈值
+        return 1e-2
+    return PRECISION_THRESHOLDS.get(dtype_str, 1e-2)
+
+
+def _check_precision_mere_mare(actual: torch.Tensor, golden: torch.Tensor) -> tuple:
+    """根据《精度对比方法.md》判定数值精度是否通过.
+
+    通过标准:
+        MERE < Threshold 且 MARE < 10 * Threshold
+
+    Returns:
+        (passed: bool, mere: float, mare: float, threshold: float, mare_threshold: float)
+    """
+    threshold = _get_threshold_for_tensor(golden)
+    mare_threshold = 10 * threshold
+
+    mere = _compute_mere(actual, golden)
+    mare = _compute_mare(actual, golden)
+
+    passed = mere < threshold and mare < mare_threshold
+    return passed, mere, mare, threshold, mare_threshold
+
+
 def _load_module(module_path: Path, module_name: str):
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
@@ -85,33 +156,37 @@ def _contains_int8_tensor(value):
     return False
 
 
-def _tensor_diff_summary(lhs: torch.Tensor, rhs: torch.Tensor, atol: float = 0.0, rtol: float = 0.0):
+def _tensor_diff_summary(lhs: torch.Tensor, rhs: torch.Tensor):
     if lhs.shape != rhs.shape:
         return f"shape mismatch: ref={tuple(lhs.shape)}, cand={tuple(rhs.shape)}"
 
     lhs_fp = torch.nan_to_num(lhs.to(torch.float32))
     rhs_fp = torch.nan_to_num(rhs.to(torch.float32))
     diff = (lhs_fp - rhs_fp).abs()
-    allowed = atol + rtol * rhs_fp.abs()
-    mismatch_mask = diff > allowed
-    mismatch_count = mismatch_mask.sum().item() if diff.numel() else 0
     total = lhs.numel()
-    mismatch_ratio = (mismatch_count / total) if total else 0.0
     max_abs = diff.max().item() if diff.numel() else 0.0
-    mean_abs = diff[mismatch_mask].mean().item() if mismatch_count else 0.0
+    mean_abs = diff.mean().item() if diff.numel() else 0.0
+
+    passed, mere, mare, threshold, mare_threshold = _check_precision_mere_mare(rhs_fp, lhs_fp)
 
     if torch.is_floating_point(lhs) or torch.is_floating_point(rhs):
         return (
             f"dtype(ref={lhs.dtype}, cand={rhs.dtype}), "
-            f"unequal_elements={mismatch_count}, mismatch_ratio={mismatch_ratio:.6%}, "
-            f"max_abs_diff={max_abs:.6g}, mean_abs_diff={mean_abs:.6g}"
+            f"max_abs_diff={max_abs:.6g}, mean_abs_diff={mean_abs:.6g}, "
+            f"MERE={mere:.6g}, MARE={mare:.6g}, "
+            f"threshold={threshold:.6g}, mare_threshold={mare_threshold:.6g}, "
+            f"passed={passed}"
         )
 
+    # 整数类型：回退到元素级对比
     lhs_i32 = lhs.to(torch.int32)
     rhs_i32 = rhs.to(torch.int32)
     delta = rhs_i32 - lhs_i32
     abs_diff = delta.abs()
     max_abs = abs_diff.max().item() if abs_diff.numel() else 0
+    mismatch_mask = delta != 0
+    mismatch_count = mismatch_mask.sum().item() if delta.numel() else 0
+    mismatch_ratio = (mismatch_count / total) if total else 0.0
     cand_gt_ref = ((delta > 0) & mismatch_mask).sum().item() if delta.numel() else 0
     cand_lt_ref = ((delta < 0) & mismatch_mask).sum().item() if delta.numel() else 0
 
@@ -143,24 +218,39 @@ def _tensor_diff_summary(lhs: torch.Tensor, rhs: torch.Tensor, atol: float = 0.0
     )
 
 
-def _compare_values(lhs, rhs, atol: float, rtol: float, path: str = "output"):
+def _compare_values(lhs, rhs, path: str = "output"):
+    """递归比较两个值，对 Tensor 使用 MERE/MARE 精度标准。"""
     if type(lhs) is not type(rhs):
         return False, f"{path}: type mismatch: ref={type(lhs).__name__}, cand={type(rhs).__name__}"
 
     if isinstance(lhs, torch.Tensor):
         if lhs.shape != rhs.shape:
             return False, f"{path}: shape mismatch: ref={tuple(lhs.shape)}, cand={tuple(rhs.shape)}"
+
         lhs_fp = torch.nan_to_num(lhs.to(torch.float32))
         rhs_fp = torch.nan_to_num(rhs.to(torch.float32))
-        if torch.allclose(lhs_fp, rhs_fp, atol=atol, rtol=rtol):
-            return True, f"{path}: matched"
-        return False, f"{path}: {_tensor_diff_summary(lhs, rhs, atol=atol, rtol=rtol)}"
+
+        # 整数类型直接元素级相等判断
+        if not (torch.is_floating_point(lhs) or torch.is_floating_point(rhs)):
+            if torch.equal(lhs, rhs):
+                return True, f"{path}: matched"
+            return False, f"{path}: {_tensor_diff_summary(lhs, rhs)}"
+
+        # 浮点类型使用 MERE/MARE 精度标准
+        passed, mere, mare, threshold, mare_threshold = _check_precision_mere_mare(rhs_fp, lhs_fp)
+        if passed:
+            return True, (
+                f"{path}: matched, "
+                f"MERE={mere:.6g}, MARE={mare:.6g}, "
+                f"threshold={threshold:.6g}, mare_threshold={mare_threshold:.6g}"
+            )
+        return False, f"{path}: {_tensor_diff_summary(lhs, rhs)}"
 
     if isinstance(lhs, list):
         if len(lhs) != len(rhs):
             return False, f"{path}: list length mismatch: ref={len(lhs)}, cand={len(rhs)}"
         for index, (a, b) in enumerate(zip(lhs, rhs)):
-            ok, message = _compare_values(a, b, atol, rtol, f"{path}[{index}]")
+            ok, message = _compare_values(a, b, f"{path}[{index}]")
             if not ok:
                 return False, message
         return True, f"{path}: matched"
@@ -168,7 +258,7 @@ def _compare_values(lhs, rhs, atol: float, rtol: float, path: str = "output"):
         if len(lhs) != len(rhs):
             return False, f"{path}: tuple length mismatch: ref={len(lhs)}, cand={len(rhs)}"
         for index, (a, b) in enumerate(zip(lhs, rhs)):
-            ok, message = _compare_values(a, b, atol, rtol, f"{path}[{index}]")
+            ok, message = _compare_values(a, b, f"{path}[{index}]")
             if not ok:
                 return False, message
         return True, f"{path}: matched"
@@ -176,7 +266,7 @@ def _compare_values(lhs, rhs, atol: float, rtol: float, path: str = "output"):
         if lhs.keys() != rhs.keys():
             return False, f"{path}: dict keys mismatch: ref={sorted(lhs.keys())}, cand={sorted(rhs.keys())}"
         for key in lhs:
-            ok, message = _compare_values(lhs[key], rhs[key], atol, rtol, f"{path}.{key}")
+            ok, message = _compare_values(lhs[key], rhs[key], f"{path}.{key}")
             if not ok:
                 return False, message
         return True, f"{path}: matched"
@@ -256,8 +346,6 @@ def _run_verification(op: str):
         "reference": "",
         "candidate": "",
         "kernel_build_dir": "",
-        "atol": 1e-2,
-        "rtol": 1e-2,
         "inputs": [],
         "comparisons": [],
         "comparison": "",
@@ -330,23 +418,13 @@ def _run_verification(op: str):
             ref_out = _normalize_output(ref_out)
             cand_out = _normalize_output(cand_out)
 
-            atol = report["atol"]
-            rtol = report["rtol"]
-            if _contains_int8_tensor(ref_out) and _contains_int8_tensor(cand_out):
-                atol = 1.5
-                rtol = 0.0
-
             ok, comparison = _compare_values(
                 ref_out,
                 cand_out,
-                atol=atol,
-                rtol=rtol,
                 path=f"output[{index}]",
             )
             comparisons.append(f"case[{index}]: {comparison}")
             all_ok = all_ok and ok
-            report["atol"] = max(report["atol"], atol)
-            report["rtol"] = min(report["rtol"], rtol) if rtol == 0.0 else report["rtol"]
 
         report["inputs"] = input_summaries
         report["comparisons"] = comparisons
@@ -381,10 +459,6 @@ def _print_report(report):
     print(f"Reference : {report['reference']}")
     print(f"Candidate : {report['candidate']}")
     print(f"Kernel    : {report['kernel_build_dir']}")
-    if report["atol"] == 1.5:
-        print(f"Tolerance : atol={report['atol']}")
-    else:
-        print(f"Tolerance : atol={report['atol']}, rtol={report['rtol']}")
 
     if report["inputs"]:
         print("-" * 72)
