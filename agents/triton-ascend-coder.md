@@ -82,19 +82,25 @@ python3 -c "import datetime,random; ts=datetime.datetime.now().strftime('%Y%m%d_
 
 ### 模式 A：标准 KernelBench
 
-当描述文件为 PyTorch `nn.Module` 实现时，调用 `op-task-extractor` skill，从用户描述中构建 KernelBench 格式的任务描述文件。
+调用 `op-task-extractor` skill。skill 会先做模式判定（依据：源 `.py` 是否含 `get_input_groups` / 同目录是否存在同名 `.json`），再走对应分支：
 
-**产出**：`{工作目录}/{op_name}.py`（仅包含 Model 类 + 输入函数 + `get_init_inputs()`，不含测试驱动）。
+#### A.1 单 case 子模式（典型来源：`benchmarks/KernelBench/`）
 
-**输入函数格式**：
-- 单 shape 场景：使用 `get_inputs()` 返回单组输入
-- 多 shape 场景：使用 `get_input_groups()` 返回多组输入列表，每组输入对应一个测试 shape
+- 源 `.py` 仅含 `get_inputs()`，`forward` 单组输入
+- skill 在工作目录构造单一自包含任务文件 `{op_name}.py`
+- 包含 `Model` + `get_inputs()` + `get_init_inputs()`，不含测试驱动
 
-**多 shape 场景处理**：
-当用户提供多个 shape 配置或明确表示需要测试多种输入大小时：
-- 任务文件应提供 `get_input_groups()` 函数，返回 `List[List[Tensor/...]]`
-- 每组输入对应一个 shape 配置，例如：`[[tensor1_shapeA, tensor2_shapeA], [tensor1_shapeB, tensor2_shapeB], ...]`
-- 验证和性能测试将遍历所有 shape 组，输出每个 shape 的性能数据
+#### A.2 多 case 子模式（典型来源：`benchmarks/level430/` 和 `benchmarks/NPUKernelBench/`）
+
+- 源 `.py` 含 `get_input_groups()`，**同目录**配套 `{op_name}.json`（JSONL，每行一个 case 输入规格）
+- skill **原样透传两个文件**到工作目录：
+  - `{工作目录}/{op_name}.py`（源 `.py` 字节级副本，禁止改写）
+  - `{工作目录}/{op_name}.json`（源 JSON 字节级副本，必须与 `.py` 同名同目录）
+- **严禁**将多 case 源裁剪为单 case 任务文件（会丢失 N-1 个 shape 的评测结果）
+
+**通用要求**：
+- 所有任务文件必须通过 `validate_task.py` 检查（多 case 模式下需遍历全部 groups 通过）
+- 下游 `verify.py` / `benchmark.py` 已内建分支判断（优先 `get_input_groups`、回落 `get_inputs`），无需在任务文件追加兼容层
 
 ### 模式 B：GPU Kernel 输入模式（TritonNPUKernelBench）
 
@@ -534,6 +540,7 @@ fi
 ```
 ${pwd}/triton_ascend_output/op_{op_name}_{timestamp}_{rid}/
 ├── {op_name}.py                          # Phase 1: KernelBench 任务描述
+├── {op_name}.json                        # Phase 1: 多 case 模式专属（与 .py 同名同目录）
 ├── sketch.txt                            # Phase 2: 算法草图
 ├── output/
 │   ├── generated_code.py                 # Phase 3 最终通过验证的代码（副本）
@@ -575,7 +582,7 @@ ${pwd}/triton_ascend_output/op_{op_name}_{timestamp}_{rid}/
 
 | 阶段 | 错误 | 处理 |
 |------|------|------|
-| Phase 1 (模式 A) | 任务文件验证失败 | 修复重试（最多 2 次） |
+| Phase 1 (模式 A) | 任务文件验证失败 | 修复重试（最多 2 次）；多 case 模式下禁止"降级为单 case"绕过 |
 | Phase 1 (模式 B) | `.pt` 文件不存在 | 报错终止，提示用户上传同名 `.pt` |
 | Phase 1 (模式 B) | `Model` 翻译验证失败 | 修复重试（最多 2 次） |
 | Phase 3 | 达到 max_iterations | 输出失败报告，任务结束 |
