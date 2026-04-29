@@ -53,7 +53,7 @@ def get_input_groups():
         }
         dtype = dtype_map[x_info["dtype"]]
         
-        x = torch.randn(x_info["shape"], dtype=dtype)
+        x = torch.distributions.Uniform(1.0, 10.0).sample(x_info["shape"]).to(dtype)
         
         size = None
         scale_factor = None
