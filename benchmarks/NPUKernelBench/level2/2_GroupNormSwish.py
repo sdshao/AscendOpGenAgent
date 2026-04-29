@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch_npu
 import json
 import os
+import random
 
 class Model(nn.Module):
     """
@@ -73,7 +74,7 @@ def get_input_groups():
         cases = [json.loads(line) for line in f if line.strip()]
     
     input_groups = []
-    for case in cases:
+    for i, case in enumerate(cases):
         inputs = case["inputs"]
         input_info = inputs[0]
         num_groups_info = inputs[1]
@@ -81,15 +82,24 @@ def get_input_groups():
         bias_info = inputs[3]
         eps_info = inputs[4]
         swish_scale_info = inputs[5]
-        
+
         dtype_map = {
             "float32": torch.float32,
             "float16": torch.float16,
             "bfloat16": torch.bfloat16,
         }
         dtype = dtype_map[input_info["dtype"]]
-        
-        inp = torch.randn(input_info["shape"], dtype=dtype)
+        shape = input_info["shape"]
+
+        if i % 2 == 0:
+            # 50% 用例：正态分布，μ ∈ [-100, 100]，σ ∈ [1, 25]
+            mu = random.uniform(-100, 100)
+            sigma = random.uniform(1, 25)
+            inp = torch.normal(mean=mu, std=sigma, size=shape).to(dtype) + torch.ones(shape, dtype=dtype)
+        else:
+            # 50% 用例：均匀分布，值域 [-5, 5]
+            inp = torch.empty(shape, dtype=dtype).uniform_(-5, 5) + torch.ones(shape, dtype=dtype)
+
         num_groups = num_groups_info["value"]
         weight = torch.ones(weight_info["shape"], dtype=dtype)
         bias = torch.zeros(bias_info["shape"], dtype=dtype)

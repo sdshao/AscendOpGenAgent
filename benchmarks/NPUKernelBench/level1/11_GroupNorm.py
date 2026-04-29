@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import json
 import os
+import random
 
 class Model(nn.Module):
     """
@@ -32,23 +33,35 @@ def get_input_groups():
         cases = [json.loads(line) for line in f if line.strip()]
     
     input_groups = []
-    for case in cases:
+    num_cases = len(cases)
+    # 50% 用例使用正态分布，50% 使用均匀分布
+    num_normal = num_cases // 2
+
+    for idx, case in enumerate(cases):
         inputs = case["inputs"]
-        
+
         dtype_map = {
             "float32": torch.float32,
             "float16": torch.float16,
             "bfloat16": torch.bfloat16,
         }
-        
+
         x_info = inputs[0]
         dtype = dtype_map[x_info["dtype"]]
-        x = torch.randn(x_info["shape"], dtype=dtype)
-        
+
+        if idx < num_normal:
+            # 正态分布: μ ∈ [-100, 100], σ ∈ [1, 25]
+            mu = random.uniform(-100, 100)
+            sigma = random.uniform(1, 25)
+            x = torch.normal(mean=mu, std=sigma, size=x_info["shape"]).to(dtype) + torch.ones(x_info["shape"], dtype=dtype)
+        else:
+            # 均匀分布: 值域 [-5, 5]
+            x = torch.empty(x_info["shape"], dtype=dtype).uniform_(-5, 5) + torch.ones(x_info["shape"], dtype=dtype)
+
         num_groups = None
         weight = None
         bias = None
-        
+
         for inp in inputs[1:]:
             if inp["name"] == "num_groups":
                 num_groups = inp["value"]
@@ -56,7 +69,7 @@ def get_input_groups():
                 weight = torch.randn(inp["shape"], dtype=dtype)
             elif inp["name"] == "bias":
                 bias = torch.randn(inp["shape"], dtype=dtype)
-        
+
         input_groups.append([x, num_groups, weight, bias])
     return input_groups
 

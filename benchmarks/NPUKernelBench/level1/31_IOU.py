@@ -57,23 +57,32 @@ def get_input_groups():
     json_path = os.path.join(os.path.dirname(__file__), "31_IOU.json")
     with open(json_path, "r") as f:
         cases = [json.loads(line) for line in f if line.strip()]
-    
+
     input_groups = []
-    for case in cases:
+    for i, case in enumerate(cases):
         inputs = case["inputs"]
         bboxes_info = inputs[0]
         gtboxes_info = inputs[1]
         mode_info = inputs[2]
-        
+
         dtype_map = {
             "float32": torch.float32,
             "float16": torch.float16,
             "bfloat16": torch.bfloat16,
         }
         dtype = dtype_map[bboxes_info["dtype"]]
-        
-        bboxes = torch.randn(bboxes_info["shape"], dtype=dtype)
-        gtboxes = torch.randn(gtboxes_info["shape"], dtype=dtype)
+
+        # 50% cases: normal distribution (mu in [-100, 100], sigma in [1, 25])
+        # 50% cases: uniform distribution in [-5, 5]
+        if i % 2 == 0:
+            mu = torch.empty(1).uniform_(-100, 100).item()
+            sigma = torch.empty(1).uniform_(1, 25).item()
+            bboxes = torch.normal(mean=mu, std=sigma, size=bboxes_info["shape"]).to(dtype) + torch.ones(bboxes_info["shape"], dtype=dtype)
+            gtboxes = torch.normal(mean=mu, std=sigma, size=gtboxes_info["shape"]).to(dtype) + torch.ones(gtboxes_info["shape"], dtype=dtype)
+        else:
+            bboxes = torch.empty(bboxes_info["shape"], dtype=dtype).uniform_(-5, 5) + torch.ones(bboxes_info["shape"], dtype=dtype)
+            gtboxes = torch.empty(gtboxes_info["shape"], dtype=dtype).uniform_(-5, 5) + torch.ones(gtboxes_info["shape"], dtype=dtype)
+
         mode = mode_info["value"]
         input_groups.append([bboxes, gtboxes, mode])
     return input_groups

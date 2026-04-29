@@ -123,7 +123,14 @@ def get_input_groups():
                         tensors[name] = torch.randint(0, max_val, shape, dtype=dtype)
                     else:
                         dtype = {'float32': torch.float32, 'float16': torch.float16, 'bfloat16': torch.bfloat16, 'int32': torch.int32, 'int64': torch.int64, 'int8': torch.int8, 'bool': torch.bool}.get(dtype_str, torch.float32)
-                        tensors[name] = torch.randn(shape, dtype=dtype)
+                        # 50% cases: normal distribution (mu in [-100, 100], sigma in [1, 25])
+                        # 50% cases: uniform distribution in [-5, 5]
+                        if len(input_groups) % 2 == 0:
+                            mu = torch.empty(1).uniform_(-100, 100).item()
+                            sigma = torch.empty(1).uniform_(1, 25).item()
+                            tensors[name] = torch.normal(mean=mu, std=sigma, size=shape).to(dtype) + torch.ones(shape, dtype=dtype)
+                        else:
+                            tensors[name] = torch.empty(shape, dtype=dtype).uniform_(-5, 5) + torch.ones(shape, dtype=dtype)
                 elif inp['type'] == 'attr':
                     tensors[inp['name']] = inp['value']
 
