@@ -59,7 +59,7 @@ def get_input_groups():
         cases = [json.loads(line) for line in f if line.strip()]
     
     input_groups = []
-    for case in cases:
+    for idx, case in enumerate(cases):
         inputs = case["inputs"]
         bboxes_info = inputs[0]
         gtboxes_info = inputs[1]
@@ -72,8 +72,14 @@ def get_input_groups():
         }
         dtype = dtype_map[bboxes_info["dtype"]]
         
-        bboxes = torch.randn(bboxes_info["shape"], dtype=dtype)
-        gtboxes = torch.randn(gtboxes_info["shape"], dtype=dtype)
+        if idx % 2 == 0:
+            mu = float(torch.empty(1).uniform_(-100, 100).item())
+            sigma = float(torch.empty(1).uniform_(1, 25).item())
+            bboxes = torch.normal(mu, sigma, bboxes_info["shape"], dtype=dtype) + torch.ones(bboxes_info["shape"], dtype=dtype)
+            gtboxes = torch.normal(mu, sigma, gtboxes_info["shape"], dtype=dtype) + torch.ones(gtboxes_info["shape"], dtype=dtype)
+        else:
+            bboxes = torch.empty(bboxes_info["shape"], dtype=dtype).uniform_(-5, 5) + torch.ones(bboxes_info["shape"], dtype=dtype)
+            gtboxes = torch.empty(gtboxes_info["shape"], dtype=dtype).uniform_(-5, 5) + torch.ones(gtboxes_info["shape"], dtype=dtype)
         mode = mode_info["value"]
         input_groups.append([bboxes, gtboxes, mode])
     return input_groups
