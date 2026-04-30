@@ -324,6 +324,10 @@ def verify_implementations(op_name, verify_dir, triton_impl_name="triton_ascend_
     ModelNew = impl_module.ModelNew
     get_init_inputs = torch_module.get_init_inputs
 
+    # 在获取输入之前设置种子，确保随机生成的输入可复现
+    torch.manual_seed(0)
+    torch.npu.manual_seed(0)
+
     input_groups, total_cases = resolve_input_provider(torch_module)
 
     device = torch.device("npu")
