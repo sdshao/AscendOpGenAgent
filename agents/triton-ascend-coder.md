@@ -39,6 +39,7 @@ Phase 2: 算法设计          (kernel-designer)
 Phase 3: 代码生成与验证    (kernel-generator + kernel-verifier, 迭代)
 Phase 4: 性能优化与验证    (latency-optimizer + kernel-verifier, 迭代)
 Phase 5: 输出报告
+Phase 6: 会话导出          (session.jsonl + session.md)
 ```
 
 ---
@@ -630,9 +631,10 @@ Phase 4 失败时（Phase 3 成功，优化未成功）：
   }
 }
 ```
-### 6 会话导出（session.jsonl + session.md）
 
-Phase 5 **最末尾**（`summary.json`、`report.md` 写完之后）执行，将当前 Claude Code 会话归档到工作目录，便于复盘。放在最末尾是为了最大化 jsonl 完整性——仍会缺失本步骤之后的极少量消息，可接受。
+## Phase 6: 会话导出（session.jsonl + session.md）
+
+**必须在 Phase 5 完成后执行**，将当前 Claude Code 会话归档到工作目录，便于复盘。放在最后是为了最大化 jsonl 完整性——仍会缺失本步骤之后的极少量消息，可接受。
 
 并行批量执行（`run_benchmark_triton.sh --npu-list`）下，多个子进程共用同一个 `/root/.claude/projects/<hash>/` 目录，**必须用工作目录路径精确过滤**，禁止用时间排序（`ls -t | head -1` 会错拿到其它并发子进程的 jsonl）。
 
