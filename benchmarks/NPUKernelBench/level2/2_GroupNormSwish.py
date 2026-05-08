@@ -74,7 +74,7 @@ def get_input_groups():
         cases = [json.loads(line) for line in f if line.strip()]
     
     input_groups = []
-    for i, case in enumerate(cases):
+    for idx, case in enumerate(cases):
         inputs = case["inputs"]
         input_info = inputs[0]
         num_groups_info = inputs[1]
@@ -89,17 +89,13 @@ def get_input_groups():
             "bfloat16": torch.bfloat16,
         }
         dtype = dtype_map[input_info["dtype"]]
-        shape = input_info["shape"]
 
-        if i % 2 == 0:
-            # 50% 用例：正态分布，μ ∈ [-100, 100]，σ ∈ [1, 25]
-            mu = random.uniform(-100, 100)
-            sigma = random.uniform(1, 25)
-            inp = torch.normal(mean=mu, std=sigma, size=shape).to(dtype) + torch.ones(shape, dtype=dtype)
+        if idx % 2 == 0:
+            mu = float(torch.empty(1).uniform_(-100, 100).item())
+            sigma = float(torch.empty(1).uniform_(1, 25).item())
+            inp = torch.normal(mu, sigma, input_info["shape"], dtype=dtype) + torch.ones(input_info["shape"], dtype=dtype)
         else:
-            # 50% 用例：均匀分布，值域 [-5, 5]
-            inp = torch.empty(shape, dtype=dtype).uniform_(-5, 5) + torch.ones(shape, dtype=dtype)
-
+            inp = torch.empty(input_info["shape"], dtype=dtype).uniform_(-5, 5) + torch.ones(input_info["shape"], dtype=dtype)
         num_groups = num_groups_info["value"]
         weight = torch.ones(weight_info["shape"], dtype=dtype)
         bias = torch.zeros(bias_info["shape"], dtype=dtype)

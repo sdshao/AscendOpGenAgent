@@ -72,16 +72,28 @@ def get_input_groups():
         }
         dtype = dtype_map[bboxes_info["dtype"]]
 
-        # 50% cases: normal distribution (mu in [-100, 100], sigma in [1, 25])
-        # 50% cases: uniform distribution in [-5, 5]
+        # 生成满足 x2 > x1 > 0, y2 > y1 > 0 的矩形框坐标
+        # 先生成左上角坐标 (x1, y1) > 0，再生成宽高 (w, h) > 0，得到右下角 (x2, y2)
         if i % 2 == 0:
             mu = torch.empty(1).uniform_(-100, 100).item()
             sigma = torch.empty(1).uniform_(1, 25).item()
-            bboxes = torch.normal(mean=mu, std=sigma, size=bboxes_info["shape"]).to(dtype) + torch.ones(bboxes_info["shape"], dtype=dtype)
-            gtboxes = torch.normal(mean=mu, std=sigma, size=gtboxes_info["shape"]).to(dtype) + torch.ones(gtboxes_info["shape"], dtype=dtype)
+            # 左上角坐标 x1, y1 在 [1, 100] 范围内
+            bboxes_xy1 = torch.normal(mean=mu, std=sigma, size=(bboxes_info["shape"][0], 2)).to(dtype).abs()
+            gtboxes_xy1 = torch.normal(mean=mu, std=sigma, size=(gtboxes_info["shape"][0], 2)).to(dtype).abs()
+            # 宽高 w, h 在 [1, 50] 范围内
+            bboxes_wh = torch.normal(mean=mu, std=sigma, size=(bboxes_info["shape"][0], 2)).to(dtype).abs()
+            gtboxes_wh = torch.normal(mean=mu, std=sigma, size=(gtboxes_info["shape"][0], 2)).to(dtype).abs()
         else:
-            bboxes = torch.empty(bboxes_info["shape"], dtype=dtype).uniform_(-5, 5) + torch.ones(bboxes_info["shape"], dtype=dtype)
-            gtboxes = torch.empty(gtboxes_info["shape"], dtype=dtype).uniform_(-5, 5) + torch.ones(gtboxes_info["shape"], dtype=dtype)
+            # 左上角坐标 x1, y1 在 [1, 6] 范围内
+            bboxes_xy1 = torch.empty((bboxes_info["shape"][0], 2), dtype=dtype).uniform_(1, 6)
+            gtboxes_xy1 = torch.empty((gtboxes_info["shape"][0], 2), dtype=dtype).uniform_(1, 6)
+            # 宽高 w, h 在 [1, 5] 范围内
+            bboxes_wh = torch.empty((bboxes_info["shape"][0], 2), dtype=dtype).uniform_(1, 5)
+            gtboxes_wh = torch.empty((gtboxes_info["shape"][0], 2), dtype=dtype).uniform_(1, 5)
+
+        # 拼接 [x1, y1, x2, y2]，其中 x2 = x1 + w, y2 = y1 + h
+        bboxes = torch.cat([bboxes_xy1, bboxes_xy1 + bboxes_wh], dim=1)
+        gtboxes = torch.cat([gtboxes_xy1, gtboxes_xy1 + gtboxes_wh], dim=1)
 
         mode = mode_info["value"]
         input_groups.append([bboxes, gtboxes, mode])

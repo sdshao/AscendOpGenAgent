@@ -23,6 +23,7 @@ NPU_ID=0
 NPU_LIST=""
 OUTPUT_DIR=""
 ARCH="ascend910b2"
+CLAUDE_PROJECT_DIR=""
 
 # ── 参数解析 ──
 while [[ $# -gt 0 ]]; do
@@ -35,6 +36,7 @@ while [[ $# -gt 0 ]]; do
         --npu-list)      NPU_LIST="$2"; shift 2 ;;
         --output)        OUTPUT_DIR="$2"; shift 2 ;;
         --arch)          ARCH="$2"; shift 2 ;;
+        --claude-project-dir) CLAUDE_PROJECT_DIR="$2"; shift 2 ;;
         -h|--help)
             echo "用法: bash utils/run_benchmark_triton.sh --benchmark-dir <path> --level <N> [--range <start-end> | --ids <id_list>] [--npu <id> | --npu-list <list>] --output <path>"
             echo ""
@@ -47,6 +49,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --npu-list       多 NPU 列表，逗号分隔，如 0,1,2,3,4,5 (与 --npu 互斥，优先级更高)"
             echo "  --output         输出目录 (必填)"
             echo "  --arch           目标设备架构，默认 ascend910b2"
+            echo "  --claude-project-dir  Claude Code 项目目录，用于定位 .jsonl 会话文件"
             echo ""
             echo "示例:"
             echo "  # 单 NPU 串行模式"
@@ -189,6 +192,15 @@ if [[ "$USE_PARALLEL" == true ]]; then
         if [[ -n "${npu_tasks[$npu]:-}" ]]; then
             (
                 # ========== Worker 进程开始 ==========
+                # 若外部未传入，则自动推导 CLAUDE_PROJECT_DIR
+                # Claude Code 项目目录命名规则：将绝对路径的 / 替换为 -，_ 替换为 -
+                if [[ -z "${CLAUDE_PROJECT_DIR:-}" ]]; then
+                    _PWD_DASH="$(pwd | sed 's|/|-|g; s|_|-|g')"
+                    CLAUDE_PROJECT_DIR="/root/.claude/projects/${_PWD_DASH}"
+                    echo "[NPU $npu] 自动推导 CLAUDE_PROJECT_DIR: ${CLAUDE_PROJECT_DIR}" >&2
+                else
+                    echo "[NPU $npu] 使用传入的 CLAUDE_PROJECT_DIR: ${CLAUDE_PROJECT_DIR}" >&2
+                fi
                 for id in ${npu_tasks[$npu]}; do
                     file="${OP_FILES[$id]}"
                     filename=$(basename "$file")
@@ -268,6 +280,16 @@ else
     echo "单 NPU 串行模式: NPU ${NPU_ID}，${TOTAL} 个算子"
     echo "================================================================"
     echo ""
+
+    # 若外部未传入，则自动推导 CLAUDE_PROJECT_DIR
+    # Claude Code 项目目录命名规则：将绝对路径的 / 替换为 -，_ 替换为 -
+    if [[ -z "${CLAUDE_PROJECT_DIR:-}" ]]; then
+        _PWD_DASH="$(pwd | sed 's|/|-|g; s|_|-|g')"
+        CLAUDE_PROJECT_DIR="/root/.claude/projects/${_PWD_DASH}"
+        echo "[NPU ${NPU_ID}] 自动推导 CLAUDE_PROJECT_DIR: ${CLAUDE_PROJECT_DIR}"
+    else
+        echo "[NPU ${NPU_ID}] 使用传入的 CLAUDE_PROJECT_DIR: ${CLAUDE_PROJECT_DIR}"
+    fi
 
     CURRENT=0
     for id in $(echo "${!OP_FILES[@]}" | tr ' ' '\n' | sort -n); do

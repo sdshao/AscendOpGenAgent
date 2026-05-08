@@ -327,20 +327,38 @@ benchmark.py 启动时按 `--triton_impl_name` 推导对应的 verify_result 文
 
 ## 精度阈值说明
 
-验证使用基于数据类型的**相对误差**比较，与 `torch.allclose` 不同：
+验证使用基于数据类型的 **MERE/MARE 双门限相对误差**判定（NPU Benchmark 标准），与 `torch.allclose` 不同。
 
-| 数据类型 | 精度阈值 (limit) | 说明 |
-|---------|-----------------|------|
-| `float16` | 0.004 | 半精度浮点 |
-| `bfloat16` | 0.03 | BF16 精度较低 |
-| `int8` | 0.01 | 整数量化 |
-| 其他（float32 等） | 0.02 | 默认阈值 |
+**判定公式**（必须同时满足）：
 
-**比较规则**：
+```
+MERE < threshold        且        MARE < 10 × threshold
+```
+
+其中：
+- `MERE` = mean(|actual - golden| / max(|golden|, threshold))，平均相对误差
+- `MARE` = max(|actual - golden| / max(|golden|, threshold))，最大相对误差
+- 计算前两侧统一升 float32，避免低精度 dtype 自身误差污染
+- 分母用 `clamp(min=threshold)` 而非 `+epsilon`：当 `|golden| < threshold`（参考值已小到 dtype 精度极限）时，rel_err 退化为 `|diff| / threshold`，等价于按绝对误差归一化，避免零值/极小值附近误报
+
+**dtype 阈值表**（2 的幂次方）：
+
+| 数据类型 | threshold | MERE 上限 | MARE 上限 (10×t) |
+|---------|-----------|-----------|------------------|
+| `float16` | 2⁻¹⁰ ≈ 9.77e-4 | 9.77e-4 | 9.77e-3 |
+| `bfloat16` | 2⁻⁷ ≈ 7.81e-3 | 7.81e-3 | 7.81e-2 |
+| `float32` | 2⁻¹³ ≈ 1.22e-4 | 1.22e-4 | 1.22e-3 |
+| `hifloat32` | 2⁻¹¹ ≈ 4.88e-4 | 4.88e-4 | 4.88e-3 |
+| `float8_e4m3` | 2⁻³ = 0.125 | 0.125 | 1.25 |
+| `float8_e5m2` | 2⁻² = 0.25 | 0.25 | 2.5 |
+| 其他 dtype（fallback） | 2⁻¹³ | 1.22e-4 | 1.22e-3 |
+
+**比对前置检查**（按顺序，任一失败即判 fail）：
 1. 形状必须一致
-2. NaN 位置必须一致
-3. Inf 位置和符号必须一致
-4. 有限值：计算相对误差，超过阈值的数量不得超过 `有限值总数 × limit`
+2. NaN 位置必须完全一致（mask 按位相等）
+3. Inf 位置和符号必须完全一致
+4. `bool` dtype：要求 `torch.equal` 完全相等，不进入 MERE/MARE 判定
+5. 仅在 `finite_mask` 上做 MERE/MARE 计算；当 dtype 不一致时 impl 会被 cast 到 golden 的 dtype
 
 ---
 

@@ -216,17 +216,18 @@ def _check_accuracy_npu_benchmark(golden, actual, data_type):
     golden_f = golden.float()
     actual_f = actual.float()
 
-    # 计算相对误差，使用 1e-7 保护分母避免除零
+    # 先取 dtype 阈值，用作分母下界 clamp。
+    # 当 |y_ref| < threshold 时，按 |diff| / threshold 衡量，等价于
+    # "参考值已小到 dtype 精度极限时，改用绝对误差归一化"，避免零值/极小值附近误报。
+    threshold = get_limit(data_type)
+
     diff = (actual_f - golden_f).abs()
-    eps = 1e-7  # 与 NPU Benchmark 标准一致的分母保护值
-    relative_error = diff / (golden_f.abs() + eps)
+    denom = golden_f.abs().clamp(min=threshold)
+    relative_error = diff / denom
 
     # 计算误差指标
     MERE = relative_error.mean().item()  # 平均相对误差
     MARE = relative_error.max().item()   # 最大相对误差
-
-    # 获取数据类型对应的阈值（2 的幂次方）
-    threshold = get_limit(data_type)
 
     # 判定标准：MERE < t 且 MARE < 10t
     is_pass = (MERE < threshold) and (MARE < 10 * threshold)
@@ -323,6 +324,10 @@ def verify_implementations(op_name, verify_dir, triton_impl_name="triton_ascend_
     FrameworkModel = torch_module.Model
     ModelNew = impl_module.ModelNew
     get_init_inputs = torch_module.get_init_inputs
+
+    # 在获取输入之前设置种子，确保随机生成的输入可复现
+    torch.manual_seed(0)
+    torch.npu.manual_seed(0)
 
     input_groups, total_cases = resolve_input_provider(torch_module)
 
