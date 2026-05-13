@@ -31,8 +31,9 @@ argument-hint: >
 │   ├── model.json        # 测试用例文件（JSON Lines），model.py 按 __file__ 查找
 │   ├── <op_name>.json    # 原始测试用例文件（备份保留）
 │   ├── <op_name>.json.bak# 原始 .json 备份
-│   ├── model_new_tilelang.py # TileLang 优化实现（如存在）
-│   ├── model_new_ascendc.py  # AscendC 优化实现（如存在）
+│   ├── model_new_tilelang.py # TileLang 优化实现（仅复杂算子路径）
+│   ├── model_new_ascendc.py  # AscendC 优化实现（内部调 torch.ops.npu.<op>()）
+│   └── kernel/           # AscendC kernel + whl 包
 └── <other_tasks>/        # 其他历史任务
 ```
 
