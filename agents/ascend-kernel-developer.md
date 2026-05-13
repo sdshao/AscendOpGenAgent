@@ -158,7 +158,6 @@ Phase 7: Trace 记录            (trace-recorder)
 ├── kernel/                      # AscendC kernel
 │   ├── CMakeLists.txt           # 编译配置
 │   ├── setup.py                 # whl 打包
-│   ├── build.sh                 # 编译+whl 安装脚本
 │   ├── ops.h                    # 算子声明 (namespace ascend_kernel)
 │   ├── register.cpp             # torch.ops.npu.* 注册
 │   ├── op_host/
@@ -437,7 +436,6 @@ while ac_iteration < max_ac_iterations:
            {output_dir}/kernel/ops.h
            {output_dir}/kernel/register.cpp
            {output_dir}/kernel/setup.py
-           {output_dir}/kernel/build.sh
            {output_dir}/model_new_ascendc.py
 
     ── 4.2 AST 退化预检查 ────────────────────────────
@@ -451,12 +449,8 @@ while ac_iteration < max_ac_iterations:
       → 继续 4.3
 
     ── 4.3 编译安装 + 功能验证 ──────────────────
-    编译安装:
-      cd {output_dir}/kernel && bash build.sh
-
-    功能验证:
-      bash .claude/hooks/wrap-evaluate.sh ascendc {output_dir}
-      Read {output_dir}/.last_ascendc_eval.summary
+    bash .claude/hooks/wrap-evaluate.sh ascendc {output_dir}
+    Read {output_dir}/.last_ascendc_eval.summary
 
     验证通过:
       → break，Phase 4 成功，进入 Phase 5
@@ -495,15 +489,21 @@ while ac_iteration < max_ac_iterations:
 
 ### kernel 编译 + whl 安装
 
-每次修改 kernel 代码后，执行：
-```bash
-cd {output_dir}/kernel && bash build.sh
+每次修改 kernel 代码后，通过 `evaluate_ascendc.sh` 完成编译与验证（内部执行 source CANN → cmake → make → setup.py bdist_wheel → pip install）。
+
+**setup.py 规范**：使用 `NpuExtension` (torch_npu 标准) + `build_lib` 指向 cmake 输出目录，`.so` 不存在时自动触发 cmake + make。
+
+**model_new_ascendc.py 加载规范**：采用双路径模式 —
+```python
+try:
+    import <op_name>_ext       # whl 安装后自动注册 torch.ops.npu.<op>
+except ImportError:
+    torch.ops.load_library()  # 兜底：直加载 kernel/build/<op_name>_ext*.so
 ```
-build.sh 自动完成：source CANN 环境 → cmake 编译 → setup.py bdist_wheel → pip install whl
 
 **产出**：
-- `{output_dir}/kernel/` — AscendC kernel 完整文件（op_host + op_kernel + ops.h + register.cpp）
-- `{output_dir}/model_new_ascendc.py` — AscendC 实现（通过退化检测 + 功能验证，内部调用 torch.ops.npu.<op>()）
+- `{output_dir}/kernel/` — AscendC kernel 完整文件（op_host + op_kernel + ops.h + register.cpp + setup.py）
+- `{output_dir}/model_new_ascendc.py` — AscendC 实现（通过退化检测 + 功能验证，双路径加载，内部调用 torch.ops.npu.<op>()）
 
 ---
 
