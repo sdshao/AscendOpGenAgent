@@ -120,18 +120,23 @@ def _resolve_call_name(node):
 
     返回 (qualifier, attr) 或 (None, name) 或 None。
     例如：torch.empty -> ('torch', 'empty')
+          torch.ops.npu.rms_norm -> ('torch.ops.npu', 'rms_norm')
           _ext.run_kernel -> ('_ext', 'run_kernel')
           my_func -> (None, 'my_func')
     """
     func = node.func if isinstance(node, ast.Call) else node
     if isinstance(func, ast.Attribute):
-        if isinstance(func.value, ast.Name):
-            return (func.value.id, func.attr)
-        # 处理 torch.nn.functional.relu 形式
-        if isinstance(func.value, ast.Attribute):
-            inner = func.value
-            if isinstance(inner.value, ast.Name):
-                return (f"{inner.value.id}.{inner.attr}", func.attr)
+        parts = []
+        current = func
+        while isinstance(current, ast.Attribute):
+            parts.append(current.attr)
+            current = current.value
+        if isinstance(current, ast.Name):
+            parts.append(current.id)
+            parts.reverse()
+            qual = ".".join(parts[:-1])
+            attr = parts[-1]
+            return (qual, attr) if qual else (None, attr)
     if isinstance(func, ast.Name):
         return (None, func.id)
     return None

@@ -71,7 +71,7 @@ argument-hint: >
 - 结果: 通过 / 失败
 - 设计路径: design.md (简单算子) / TileLang 转译 (复杂算子)
 - 产物: kernel/op_host/<op>.cpp, kernel/op_kernel/<op>.cpp, kernel/ops.h, kernel/register.cpp
-- 编译: build.sh → whl 包安装
+- 编译: evaluate_ascendc.sh (cmake + make + whl)
 - evaluate_ascendc.sh 执行次数: {n}
 - 关键错误信息: {评测脚本返回的错误，原文引用}
 - Agent 行为记录:

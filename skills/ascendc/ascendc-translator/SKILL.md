@@ -42,7 +42,6 @@ argument-hint: >
 │   ├── kernel/           # AscendC kernel（op_host/ + op_kernel/ 分层）
 │   │   ├── CMakeLists.txt
 │   │   ├── setup.py      # whl 打包配置
-│   │   ├── build.sh      # 编译+whl 安装脚本
 │   │   ├── ops.h         # 算子声明
 │   │   ├── register.cpp  # torch.ops.npu.* 注册
 │   │   ├── op_host/
@@ -80,7 +79,6 @@ argument-hint: >
    - `{output_dir}/kernel/ops.h` — 算子函数声明
    - `{output_dir}/kernel/register.cpp` — torch.ops.npu.* 注册
    - `{output_dir}/kernel/setup.py` — whl 打包配置
-   - `{output_dir}/kernel/build.sh` — 编译+whl 安装脚本
    - `{output_dir}/kernel/CMakeLists.txt` — CMake 编译配置
    - `{output_dir}/kernel/utils/kernel_common.h` — CopyTiling 等公共工具
    参考文档：`@references/dsl2Ascendc.md`
@@ -118,11 +116,38 @@ argument-hint: >
    ```
 
 2. `编写 model_new_ascendc.py + 编译验证`
-   编写 `{output_dir}/model_new_ascendc.py`，内部通过 `torch.ops.load_library()` 加载编译好的 `.so`，forward() 中调用 `torch.ops.npu.<op_name>(...)`。
-   **禁止**在 model_new_ascendc.py 中使用 `torch.*` / `F.*` 计算算子。
-   然后编译安装并验证：
-   ```bash
-   cd {output_dir}/kernel && bash build.sh  # 编译 + whl 安装
+   编写 `{output_dir}/model_new_ascendc.py`，采用**双路径加载**模式：
+   - 优先 `import <op_name>_ext`（whl 安装后自动触发 TORCH_LIBRARY 注册）
+   - 失败回退 `torch.ops.load_library()` 直加载 `kernel/build/<op_name>_ext*.so`
+   - forward() 中调用 `torch.ops.npu.<op_name>(...)`
+
+   示例：
+   ```python
+   import sys
+   from pathlib import Path
+
+   import torch
+   import torch.nn as nn
+
+   _KERNEL_BUILD = Path(__file__).resolve().parent / "kernel" / "build"
+   _LIB_PATTERN = str(_KERNEL_BUILD / "<op_name>_ext*")
+
+   try:
+       import <op_name>_ext  # noqa: F401 — whl path
+   except ImportError:
+       # Fallback: direct .so loading
+       if _LIB_PATTERN not in "".join(sys.path):
+           import glob as _glob
+           _libs = _glob.glob(_LIB_PATTERN)
+           if _libs:
+               torch.ops.load_library(_libs[0])
+
+   class ModelNew(nn.Module):
+       def forward(self, x, ...):
+           ...
+           return torch.ops.npu.<op_name>(x, ...)
    ```
-   最后调用 `@references/evaluate_ascendc.sh {output_dir}` 验证；如果结果不正确，继续迭代修改直到通过验证。迭代次数上限为 3 次，若 3 次迭代后仍未通过验证，停止迭代并报告当前状态。若 TileLang 表达与真实执行语义存在偏差，应以设计意图和参考实现为准完成 AscendC 落地。
+
+   **禁止**在 model_new_ascendc.py 中使用 `torch.*` / `F.*` 计算算子。
+   然后调用 `@references/evaluate_ascendc.sh {output_dir}` 编译并验证（内部 cmake + make + whl 安装）；如果结果不正确，继续迭代修改直到通过验证。迭代次数上限为 3 次，若 3 次迭代后仍未通过验证，停止迭代并报告当前状态。若 TileLang 表达与真实执行语义存在偏差，应以设计意图和参考实现为准完成 AscendC 落地。
    参考文档：`@references/AscendCVerification.md`

@@ -3,7 +3,7 @@ name: ascendc-code-gen
 description: >
   AscendC kernel 代码生成专家 Skill。读取设计文档（design.md 或 tile_level 设计），
   根据算子类型选择模板，生成 op_host/<op>.cpp + op_kernel/<op>.cpp +
-  ops.h + register.cpp，并生成 setup.py + build.sh 完成 whl 编译打包。
+  ops.h + register.cpp + setup.py，编译验证统一由 evaluate_ascendc.sh 完成。
 argument-hint: >
   输入：output_dir 目录路径（包含设计文档）。
   输出：kernel/ 下的 AscendC 实现、model_new_ascendc.py。
@@ -34,7 +34,6 @@ argument-hint: >
 {output_dir}/kernel/
 ├── CMakeLists.txt           # CMake 编译配置
 ├── setup.py                 # whl 打包配置
-├── build.sh                 # 一键编译+安装脚本
 ├── ops.h                    # 算子函数声明 (namespace ascend_kernel)
 ├── register.cpp             # torch.ops.npu.* 注册
 ├── op_host/
@@ -174,26 +173,79 @@ Schema 类型映射:
 | `bool` | `bool` | `bool flag=False` |
 
 #### 4.3 `setup.py`
-whl 打包配置，包名 `ascend_kernel_<op_name>`，包含编译好的 `.so`。
 
-#### 4.4 `build.sh`
-```bash
-source ${ASCEND_HOME_PATH}/set_env.sh
-mkdir -p build && cd build
-cmake .. && make -j$(nproc)
-cd ..
-python setup.py bdist_wheel
-pip install dist/*.whl --force-reinstall --no-deps
+使用 `NpuExtension` (torch_npu 标准) + `cmake build_lib` 模式：
+
+```python
+import os, glob, subprocess
+from pathlib import Path
+
+import setuptools
+from setuptools.command.build_ext import build_ext
+from torch_npu.utils.cpp_extension import NpuExtension
+
+HERE = Path(__file__).resolve().parent
+BUILD_DIR = HERE / "build"
+
+
+class BuildExt(build_ext):
+    def run(self):
+        so_files = glob.glob(str(BUILD_DIR / "<op_name>_ext*.so"))
+        if not so_files:
+            os.makedirs(BUILD_DIR, exist_ok=True)
+            soc_ver = os.environ.get("SOC_VERSION", "Ascend910B2")
+            ascend = os.environ.get("ASCEND_HOME_PATH", "")
+            subprocess.check_call(
+                ["cmake", str(HERE),
+                 f"-DSOC_VERSION={soc_ver}",
+                 f"-DASCEND_CANN_PACKAGE_PATH={ascend}",
+                 "-DCMAKE_BUILD_TYPE=Release"],
+                cwd=BUILD_DIR)
+            subprocess.check_call(
+                ["make", f"-j{os.cpu_count()}"], cwd=BUILD_DIR)
+
+        self.build_lib = str(BUILD_DIR)
+        super().run()
+
+
+setuptools.setup(
+    name="<op_name>",
+    version="0.1.0",
+    description="<OperatorName> AscendC kernel",
+    ext_modules=[NpuExtension("<op_name>_ext", sources=[])],
+    cmdclass={"build_ext": BuildExt},
+    license="BSD 3-Clause",
+    python_requires=">=3.8",
+)
 ```
+
+关键机制：`build_lib` 指向 cmake 输出目录 `build/`，setuptools 直接从 cmake 产物打包 whl；`.so 不存在时自动触发 cmake + make`。
 
 ### 阶段 5: 生成 model_new_ascendc.py
 
+采用**双路径加载**模式：优先 import（whl 安装后自动触发 TORCH_LIBRARY 注册），失败回退 `torch.ops.load_library` 直加载 `.so`：
+
 ```python
+import sys
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 
-# 加载算子库
-torch.ops.load_library("kernel/build/lib<op_name>.so")
+_KERNEL_BUILD = Path(__file__).resolve().parent / "kernel" / "build"
+_LIB_PATTERN = str(_KERNEL_BUILD / "<op_name>_ext*")
+
+# 优先 whl import（触发 TORCH_LIBRARY 注册）
+try:
+    import <op_name>_ext  # noqa: F401
+except ImportError:
+    # 兜底：直加载 .so
+    if _LIB_PATTERN not in "".join(sys.path):
+        import glob as _glob
+        _libs = _glob.glob(_LIB_PATTERN)
+        if _libs:
+            torch.ops.load_library(_libs[0])
+
 
 class ModelNew(nn.Module):
     def __init__(self, ...):
@@ -232,4 +284,5 @@ class ModelNew(nn.Module):
 
 ### model_new_ascendc.py
 - [ ] 无 torch 计算算子
+- [ ] 双路径加载: `try: import <op>_ext` 优先, `except: torch.ops.load_library` 兜底
 - [ ] 通过 torch.ops.npu.<op>() 调用 kernel
