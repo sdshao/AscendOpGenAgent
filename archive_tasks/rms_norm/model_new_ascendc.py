@@ -5,10 +5,12 @@ import torch
 import torch.nn as nn
 
 _KERNEL_BUILD = Path(__file__).resolve().parent / "kernel" / "build"
-if _KERNEL_BUILD.is_dir() and str(_KERNEL_BUILD) not in sys.path:
-    sys.path.insert(0, str(_KERNEL_BUILD))
-
-import _rms_norm_ext as _ext  # noqa: E402
+_LIB_PATTERN = str(_KERNEL_BUILD / "rms_norm_ext*")
+if _LIB_PATTERN not in "".join(sys.path):
+    import glob as _glob
+    _libs = _glob.glob(_LIB_PATTERN)
+    if _libs:
+        torch.ops.load_library(_libs[0])
 
 
 class ModelNew(nn.Module):
@@ -27,7 +29,7 @@ class ModelNew(nn.Module):
         original_shape = x.shape
         x_2d = x.reshape(-1, x.shape[-1]).contiguous()
         gamma_1d = gamma.contiguous()
-        y_2d, inv_rms_1d = _ext.run_rms_norm(x_2d, gamma_1d, self.eps)
+        y_2d, inv_rms_1d = torch.ops.npu.rms_norm(x_2d, gamma_1d, self.eps)
         return (
             y_2d.reshape(original_shape),
             inv_rms_1d.reshape(*original_shape[:-1], 1),
