@@ -16,6 +16,7 @@ skills:
   - tilelang-designer
   - ascendc-translator
   - ascendc-code-gen
+  - ascendc-operator-project-init
   - testcase-gen
   - performance-analyzer
   - trace-recorder
@@ -79,7 +80,7 @@ else:
 
 ```
 Phase 0: 参数确认 + 算子分类    (解析输入，判定简单/复杂路径)
-Phase 1: 环境准备              (复制算子文件到输出目录)
+Phase 1: 环境准备 + 工程初始化  (复制算子文件 + 初始化 kernel 工程 + 算子注册)
 Phase 2: 测试用例精简           (case-simplifier)
 Phase 3: 设计表达              (分支)
   ├─ 简单算子: design.md 生成 (design-doc-generator)
@@ -159,13 +160,14 @@ Phase 7: Trace 记录            (trace-recorder)
 │   ├── CMakeLists.txt           # 编译配置
 │   ├── setup.py                 # whl 打包
 │   ├── ops.h                    # 算子声明 (namespace ascend_kernel)
-│   ├── register.cpp             # torch.ops.npu.* 注册
+│   ├── register.cpp             # torch.ops.npu.* 注册（仅注册，不含 host 逻辑）
 │   ├── op_host/
-│   │   └── <op_name>.cpp        # Host 端 (tiling + kernel launch)
+│   │   └── <op_name>.cpp        # Host 端: tiling + EXEC_KERNEL_CMD 启动
 │   ├── op_kernel/
-│   │   └── <op_name>.cpp        # Device 端 (CopyIn→Compute→CopyOut)
-│   └── utils/
-│       └── kernel_common.h      # CopyTiling 等公共工具
+│   │   └── <op_name>.cpp        # Device 端: CopyIn→Compute→CopyOut
+│   └── utils/                   # 固定工具文件（从 ascendc-operator-project-init 模板复制）
+│       ├── torch_kernel_helper.h   # EXEC_KERNEL_CMD 宏
+│       └── torch_aclnn_helper.h    # EXEC_NPU_CMD 宏
 │
 ├── test/                        # 测试目录
 │   ├── <op_name>-test-cases.md  # 统一测试用例文档
@@ -184,6 +186,7 @@ Phase 7: Trace 记录            (trace-recorder)
 - `tilelang-designer`：BlockLevelDesign.md、TileLangAscendProgrammingGuide.md、TileLangDebug.md、evaluate_tilelang.sh
 - `ascendc-translator`：dsl2Ascendc.md、TileLang-AscendC-API-Mapping.md、AscendC_knowledge/、AscendCVerification.md、evaluate_ascendc.sh
 - `ascendc-code-gen`：elementwise_op_host.cpp、elementwise_op_kernel.cpp、row_op_host.cpp、row_op_kernel.cpp 等模板、GUIDE.md、data-copy-api.md、vector-compute-api.md、sync-control-api.md、resource-management-api.md、basic-data-structures-api.md、kernel-constraints.md
+- `ascendc-operator-project-init`：templates/ascend-kernel/（完整项目模板）、scripts/detect_ascend_kernel_project.sh
 - `testcase-gen`：test-cases-template.md
 - `performance-analyzer`：performance.py
 - `trace-recorder`：evaluate_tilelang.sh、evaluate_ascendc.sh
@@ -222,14 +225,111 @@ Phase 7: Trace 记录            (trace-recorder)
 
 ---
 
-## Phase 1: 环境准备
+## Phase 1: 环境准备 + 工程初始化
 
-### 操作步骤
+### 1.1 复制算子文件
 
 1. 创建 `{output_dir}/` 目录（如不存在）
 2. 复制 `{op_file}` 到 `{output_dir}/model.py`
-3. 查找 `{op_file}` 同级目录下与算子同名的 `.json` 文件（如 `31_ELU.json`），若存在则复制到 `{output_dir}/`
+3. 查找 `{op_file}` 同级目录下与算子同名的 `.json` 文件，若存在则复制到 `{output_dir}/`
 4. 后续所有操作都在 `{output_dir}/` 目录下进行
+
+### 1.2 初始化 kernel 工程
+
+创建 `{output_dir}/kernel/` 目录骨架并复制固定工具文件：
+
+```bash
+mkdir -p {output_dir}/kernel/op_host
+mkdir -p {output_dir}/kernel/op_kernel
+mkdir -p {output_dir}/kernel/utils
+# 从模板复制固定工具文件（不生成，内容固定）
+cp skills/ascendc/ascendc-operator-project-init/templates/ascend-kernel/csrc/utils/torch_kernel_helper.h {output_dir}/kernel/utils/
+cp skills/ascendc/ascendc-operator-project-init/templates/ascend-kernel/csrc/utils/torch_aclnn_helper.h {output_dir}/kernel/utils/
+```
+
+kernel 目录结构（后续 Phase 4 由 code-gen / translator skill 填充）：
+```
+{output_dir}/kernel/
+├── CMakeLists.txt           # cmake 编译配置
+├── setup.py                 # whl 打包（NpuExtension + build_lib 指向 build/）
+├── ops.h                    # 算子声明 (namespace ascend_kernel)
+├── register.cpp             # torch.ops.npu.* 注册
+├── op_host/
+│   └── <op_name>.cpp        # Host 端: tiling + EXEC_KERNEL_CMD 启动
+├── op_kernel/
+│   └── <op_name>.cpp        # Device 端: CopyIn → Compute → CopyOut
+└── utils/
+    └── kernel_common.h      # CopyTiling 等公共工具
+```
+
+### 1.3 算子调用链（必读）
+
+整个调用链从 Python 端 `torch.ops.npu.<op_name>(...)` 向下贯通至 AscendC kernel，每层有硬约束：
+
+```
+Python: torch.ops.npu.<op_name>(args)
+  │  通过 TORCH_LIBRARY 自动分发
+  ▼
+register.cpp: TORCH_LIBRARY_IMPL(npu, PrivateUse1, m)
+  │  m.impl("<op_name>", TORCH_FN(ascend_kernel::<op_name>))
+  ▼
+op_host/<op_name>.cpp: at::Tensor <op_name>(args)
+  │  计算 tiling → EXEC_KERNEL_CMD(<op_name>, blockDim, 左值参数...)
+  ▼
+op_kernel/<op_name>.cpp: AscendC kernel (AICore 上执行)
+```
+
+**EXEC_KERNEL_CMD 硬约束**：所有参数必须是**左值**（具名变量），禁止传入临时变量/右值/字面量。
+- `double` → 先转为 `float` 局部变量再传入
+- `int64_t` / `int` → 先赋给局部变量再传入
+- `bool` → 用 `int64_t` 局部变量替代
+
+```cpp
+// 正确: 所有参数都是左值
+int64_t totalLength = dim0 * dim1;
+float scale = 1.0f;
+EXEC_KERNEL_CMD(kernel_name, blockDim, input, output, totalLength, scale);
+
+// 错误: 字面量/表达式是右值
+EXEC_KERNEL_CMD(kernel_name, blockDim, input, output, dim0*dim1, 1.0);
+```
+
+**TORCH_LIBRARY 注册模式**（register.cpp 仅含注册，不含 host 逻辑）：
+```cpp
+#include "ops.h"
+#include <torch/library.h>
+
+TORCH_LIBRARY_FRAGMENT(npu, m) {
+    m.def("<op_name>(Tensor self, int[] kernel_size, float eps) -> Tensor");
+}
+TORCH_LIBRARY_IMPL(npu, PrivateUse1, m) {
+    m.impl("<op_name>", TORCH_FN(ascend_kernel::<op_name>));
+}
+```
+
+**op_host/<op_name>.cpp 模式**（使用 EXEC_KERNEL_CMD 启动 kernel）：
+```cpp
+#include "torch_kernel_helper.h"
+#include "tiling/platform/platform_ascendc.h"
+#include "aclrtlaunch_<kernel_func>.h"  // cmake 自动生成
+
+namespace ascend_kernel {
+at::Tensor <op_name>(args) {
+    // ... tiling 计算 ...
+    // 注意: 按 dtype 调用不同 kernel 入口时，需分别 include 对应 aclrtlaunch_ 头
+    EXEC_KERNEL_CMD(<kernel_func>, blockDim, tensorArg1, tensorArg2, leftVal1, leftVal2, ...);
+    return output;
+}
+}
+```
+
+Schema 类型映射：`at::Tensor` → `Tensor`、`at::IntArrayRef` → `int[]`、`int64_t` → `int`、`double` → `float`、`bool` → `bool`。
+
+**Python 端调用**（model_new_ascendc.py 中）：
+```python
+# 在 forward() 中直接调用注册好的算子
+return torch.ops.npu.<op_name>(x, kernel_size, eps)
+```
 
 ---
 

@@ -6,11 +6,18 @@ import torch.nn as nn
 
 _KERNEL_BUILD = Path(__file__).resolve().parent / "kernel" / "build"
 _LIB_PATTERN = str(_KERNEL_BUILD / "rms_norm_ext*")
-if _LIB_PATTERN not in "".join(sys.path):
-    import glob as _glob
-    _libs = _glob.glob(_LIB_PATTERN)
-    if _libs:
-        torch.ops.load_library(_libs[0])
+
+# Prefer whl import (triggers TORCH_LIBRARY registration in register.cpp)
+try:
+    import rms_norm_ext  # noqa: F811
+except ImportError:
+    # Fallback: direct .so loading from kernel/build/
+    if _LIB_PATTERN not in "".join(sys.path):
+        import glob as _glob
+
+        _libs = _glob.glob(_LIB_PATTERN)
+        if _libs:
+            torch.ops.load_library(_libs[0])
 
 
 class ModelNew(nn.Module):

@@ -43,13 +43,14 @@ argument-hint: >
 │   │   ├── CMakeLists.txt
 │   │   ├── setup.py      # whl 打包配置
 │   │   ├── ops.h         # 算子声明
-│   │   ├── register.cpp  # torch.ops.npu.* 注册
+│   │   ├── register.cpp  # torch.ops.npu.* 注册（仅注册）
 │   │   ├── op_host/
-│   │   │   └── <op_name>.cpp
+│   │   │   └── <op_name>.cpp  # Host 端: tiling + EXEC_KERNEL_CMD
 │   │   ├── op_kernel/
 │   │   │   └── <op_name>.cpp
-│   │   └── utils/
-│   │       └── kernel_common.h
+│   │   └── utils/        # 固定工具（从模板复制，不生成）
+│   │       ├── torch_kernel_helper.h
+│   │       └── torch_aclnn_helper.h
 │   ├── test/             # 测试目录
 │   │   ├── <op_name>-test-cases.md
 │   │   └── test_<op_name>.py
@@ -89,7 +90,7 @@ argument-hint: >
    - 使用平台 API 获取 `GetCoreNumAiv()` 和 `GetCoreMemSize(UB)`
    - Block 级 tiling: Cache Line 512B 对齐，formerNum/formerLength/tailNum/tailLength
    - UB 级 tiling: bufferCoefficient 推导，32B 对齐 tileLength
-   - `EXEC_KERNEL_CMD` 所有参数必须为左值
+   - `EXEC_KERNEL_CMD` 所有参数必须为**左值**（具名变量），禁止传入临时变量/右值/字面量。`double` 先转 `float` 局部变量，`bool` 用 `int64_t` 替代，表达式先赋给局部变量再传入
 
    **op_kernel/<op_name>.cpp** 模式：
    - template class `Kernel<OpName>` 含 Init/Process/CopyIn/Compute/CopyOut
@@ -107,6 +108,9 @@ argument-hint: >
 
    **register.cpp** 模式：
    ```cpp
+   #include "ops.h"
+   #include <torch/library.h>
+
    TORCH_LIBRARY_FRAGMENT(npu, m) {
        m.def("<op_name>(<schema>) -> Tensor");
    }
