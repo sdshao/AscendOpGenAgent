@@ -30,6 +30,18 @@ cmake "${SCRIPT_DIR}" \
 
 make -j$(nproc)
 
+# WHL pack & install
+echo ""
+echo "--- WHL packaging ---"
+cd "${SCRIPT_DIR}"
+python setup.py bdist_wheel
+
+echo ""
+echo "--- Installing WHL ---"
+pip install dist/*.whl --force-reinstall 2>/dev/null || pip install dist/*.whl
+
+echo ""
 echo "Build complete: ${BUILD_DIR}"
-echo "Output library:"
-find "${BUILD_DIR}" -name "*.so" -type f 2>/dev/null || echo "  (check build/ for output)"
+echo "Output files:"
+find "${BUILD_DIR}" -name "*.so" -type f 2>/dev/null || true
+find "${SCRIPT_DIR}/dist" -name "*.whl" -type f 2>/dev/null || echo "  (no dist/*.whl found)"

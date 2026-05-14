@@ -1,4 +1,5 @@
-// RMSNorm op_host — tiling calculation + strategy dispatch + kernel launch
+// RMSNorm op_host — tiling calculation + strategy dispatch + EXEC_KERNEL_CMD launch
+// Format: Abs-style with platform_ascendc and EXEC_KERNEL_CMD
 
 #include <algorithm>
 #include <cstdint>
@@ -6,48 +7,20 @@
 #include <torch/extension.h>
 #include <torch/library.h>
 
-#include "acl/acl.h"
-#include "torch_npu/csrc/core/npu/NPUStream.h"
+#include "torch_kernel_helper.h"
+#include "tiling/platform/platform_ascendc.h"
+
+#include "aclrtlaunch_rms_norm_merge_n.h"
+#include "aclrtlaunch_rms_norm_single_row.h"
+#include "aclrtlaunch_rms_norm_splitd.h"
 
 // ---------------------------------------------------------------------------
-// Tiling constants & struct (shared with kernel via OP_KERNEL_SRC)
+// Tiling constants
 // ---------------------------------------------------------------------------
 
 constexpr int32_t DEFAULT_BLOCK_M = 64;
 constexpr int32_t DEFAULT_ROW_FACTOR = 8;
 constexpr int32_t DEFAULT_NUM_PHYSICAL_CORES = 20;
-
-struct RmsNormTilingData {
-    int32_t M;
-    int32_t N;
-    int32_t blockM;
-    int32_t usedCoreNum;
-    int32_t tasksPerCore;
-    int32_t rowFactor;
-    float eps;
-    float invN;
-};
-
-// ---------------------------------------------------------------------------
-// Forward declarations of kernel entry points (defined in op_kernel/rms_norm.cpp)
-// ---------------------------------------------------------------------------
-
-// merge_n strategy
-extern "C" void rms_norm_MergeN_do_fp32(uint32_t, void *, uint8_t *, uint8_t *, uint8_t *, uint8_t *, uint8_t *);
-extern "C" void rms_norm_MergeN_do_fp16(uint32_t, void *, uint8_t *, uint8_t *, uint8_t *, uint8_t *, uint8_t *);
-extern "C" void rms_norm_MergeN_do_bf16(uint32_t, void *, uint8_t *, uint8_t *, uint8_t *, uint8_t *, uint8_t *);
-
-// single_row strategy
-extern "C" void rms_norm_SingleRow_do_fp32(uint32_t, void *, uint8_t *, uint8_t *, uint8_t *, uint8_t *, uint8_t *);
-extern "C" void rms_norm_SingleRow_do_fp16(uint32_t, void *, uint8_t *, uint8_t *, uint8_t *, uint8_t *, uint8_t *);
-extern "C" void rms_norm_SingleRow_do_bf16(uint32_t, void *, uint8_t *, uint8_t *, uint8_t *, uint8_t *, uint8_t *);
-
-// splitd strategy
-extern "C" void rms_norm_SplitD_do_fp32(uint32_t, void *, uint8_t *, uint8_t *, uint8_t *, uint8_t *, uint8_t *);
-extern "C" void rms_norm_SplitD_do_fp16(uint32_t, void *, uint8_t *, uint8_t *, uint8_t *, uint8_t *, uint8_t *);
-extern "C" void rms_norm_SplitD_do_bf16(uint32_t, void *, uint8_t *, uint8_t *, uint8_t *, uint8_t *, uint8_t *);
-
-using LaunchFn = void (*)(uint32_t, void *, uint8_t *, uint8_t *, uint8_t *, uint8_t *, uint8_t *);
 
 // ---------------------------------------------------------------------------
 // Host function
@@ -67,73 +40,51 @@ std::vector<at::Tensor> rms_norm(const at::Tensor &x, const at::Tensor &gamma, d
         "gamma must have the same dtype as x");
     TORCH_CHECK(x.is_contiguous(), "x must be contiguous");
     TORCH_CHECK(gamma.is_contiguous(), "gamma must be contiguous");
-    TORCH_CHECK(x.sizes()[1] == gamma.sizes()[0], "gamma shape mismatch");
+    TORCH_CHECK(static_cast<int32_t>(x.sizes()[1]) == static_cast<int32_t>(gamma.sizes()[0]),
+        "gamma shape mismatch");
 
-    const auto m = static_cast<int32_t>(x.sizes()[0]);
-    const auto n = static_cast<int32_t>(x.sizes()[1]);
+    int32_t M = static_cast<int32_t>(x.sizes()[0]);
+    int32_t N = static_cast<int32_t>(x.sizes()[1]);
 
-    const int32_t mNum = (m + DEFAULT_BLOCK_M - 1) / DEFAULT_BLOCK_M;
-    const int32_t usedCoreNum = std::min<int32_t>(DEFAULT_NUM_PHYSICAL_CORES, mNum);
-    const int32_t tasksPerCore = (mNum + usedCoreNum - 1) / usedCoreNum;
+    int32_t mNum = (M + DEFAULT_BLOCK_M - 1) / DEFAULT_BLOCK_M;
+    int32_t usedCoreNum = std::min<int32_t>(DEFAULT_NUM_PHYSICAL_CORES, std::max<int32_t>(1, mNum));
+    int32_t tasksPerCore = (mNum + usedCoreNum - 1) / usedCoreNum;
 
     at::Tensor y = at::empty_like(x);
-    at::Tensor invRms = at::empty({m}, x.options());
+    at::Tensor invRms = at::empty({M}, x.options());
 
-    // Pack tiling data
-    at::Tensor tilingCpu = at::empty(
-        {static_cast<long>(sizeof(RmsNormTilingData))},
-        at::device(at::kCPU).dtype(at::kByte));
-    auto *tiling = reinterpret_cast<RmsNormTilingData *>(tilingCpu.data_ptr());
-    tiling->M = m;
-    tiling->N = n;
-    tiling->blockM = DEFAULT_BLOCK_M;
-    tiling->usedCoreNum = usedCoreNum;
-    tiling->tasksPerCore = tasksPerCore;
-    tiling->rowFactor = DEFAULT_ROW_FACTOR;
-    tiling->eps = static_cast<float>(eps);
-    tiling->invN = 1.0f / static_cast<float>(n);
-    auto tilingNpu = tilingCpu.to(at::kPrivateUse1);
-
-    auto aclStream = c10_npu::getCurrentNPUStream().stream(false);
-
-    // Strategy + dtype dispatch
-    LaunchFn launch = nullptr;
-    if (x.scalar_type() == at::kFloat) {
-        if (n <= 1024) {
-            launch = rms_norm_MergeN_do_fp32;
-        } else if (n > 8192) {
-            launch = rms_norm_SplitD_do_fp32;
-        } else {
-            launch = rms_norm_SingleRow_do_fp32;
-        }
-    } else if (x.scalar_type() == at::kHalf) {
-        if (n <= 1024) {
-            launch = rms_norm_MergeN_do_fp16;
-        } else if (n > 8192) {
-            launch = rms_norm_SplitD_do_fp16;
-        } else {
-            launch = rms_norm_SingleRow_do_fp16;
-        }
+    // dtype flag: 0=fp32, 1=fp16, 2=bf16
+    int64_t dtypeFlag = 0;
+    if (x.scalar_type() == at::kHalf) {
+        dtypeFlag = 1;
     } else if (x.scalar_type() == at::kBFloat16) {
-        if (n <= 1024) {
-            launch = rms_norm_MergeN_do_bf16;
-        } else if (n > 8192) {
-            launch = rms_norm_SplitD_do_bf16;
-        } else {
-            launch = rms_norm_SingleRow_do_bf16;
-        }
-    } else {
-        TORCH_CHECK(false, "unsupported dtype");
+        dtypeFlag = 2;
     }
 
-    launch(
-        usedCoreNum,
-        aclStream,
-        static_cast<uint8_t *>(const_cast<void *>(x.storage().data())),
-        static_cast<uint8_t *>(const_cast<void *>(gamma.storage().data())),
-        static_cast<uint8_t *>(const_cast<void *>(y.storage().data())),
-        static_cast<uint8_t *>(const_cast<void *>(invRms.storage().data())),
-        static_cast<uint8_t *>(const_cast<void *>(tilingNpu.storage().data())));
+    // All tiling params as left values (required by EXEC_KERNEL_CMD)
+    int32_t blockM = DEFAULT_BLOCK_M;
+    int32_t rowFactor = DEFAULT_ROW_FACTOR;
+    float epsVal = static_cast<float>(eps);
+    float invN = 1.0f / static_cast<float>(N);
+    uint32_t blockDim = static_cast<uint32_t>(usedCoreNum);
+
+    // Strategy dispatch: select kernel name and params
+    if (N <= 1024) {
+        EXEC_KERNEL_CMD(rms_norm_merge_n, blockDim,
+                        x, gamma, y, invRms,
+                        M, N, blockM, usedCoreNum, tasksPerCore, rowFactor, epsVal, invN,
+                        dtypeFlag);
+    } else if (N > 8192) {
+        EXEC_KERNEL_CMD(rms_norm_splitd, blockDim,
+                        x, gamma, y, invRms,
+                        M, N, blockM, usedCoreNum, tasksPerCore, epsVal, invN,
+                        dtypeFlag);
+    } else {
+        EXEC_KERNEL_CMD(rms_norm_single_row, blockDim,
+                        x, gamma, y, invRms,
+                        M, N, blockM, usedCoreNum, tasksPerCore, epsVal, invN,
+                        dtypeFlag);
+    }
 
     return {y, invRms};
 }

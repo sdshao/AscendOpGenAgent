@@ -5,21 +5,19 @@ import torch
 import torch.nn as nn
 
 _KERNEL_BUILD = Path(__file__).resolve().parent / "kernel" / "build"
-if _KERNEL_BUILD.is_dir() and str(_KERNEL_BUILD) not in sys.path:
-    sys.path.insert(0, str(_KERNEL_BUILD))
 
-import _quant_matmul_ext as _ext  # noqa: E402
+try:
+    import quant_matmul_ext
+except ImportError:
+    import glob as _glob
+    _libs = _glob.glob(str(_KERNEL_BUILD / "quant_matmul_ext*.so"))
+    if _libs:
+        torch.ops.load_library(_libs[0])
 
 
 class ModelNew(nn.Module):
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__()
 
-    def forward(self, a: torch.Tensor, b: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-        assert a.ndim == 2 and b.ndim == 2, "a and b must be 2D"
-        assert scale.ndim == 1, "scale must be 1D"
-        assert a.shape[1] == b.shape[0], "k dimension must match"
-        assert b.shape[1] == scale.shape[0], "scale size must match N"
-        assert a.dtype == b.dtype == torch.int8, "a and b must be int8"
-        assert scale.dtype == torch.float32, "scale must be float32"
-        return _ext.run_int8_matmul_scale(a, b, scale)
+    def forward(self, a, b, scale):
+        return torch.ops.npu.quant_matmul(a, b, scale)

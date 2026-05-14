@@ -35,13 +35,14 @@ argument-hint: >
 ├── CMakeLists.txt           # CMake 编译配置
 ├── setup.py                 # whl 打包配置
 ├── ops.h                    # 算子函数声明 (namespace ascend_kernel)
-├── register.cpp             # torch.ops.npu.* 注册
+├── register.cpp             # torch.ops.npu.* 注册（仅注册，不含 host 逻辑）
 ├── op_host/
-│   └── <op_name>.cpp        # Host 端: tiling 计算 + kernel launch
+│   └── <op_name>.cpp        # Host 端: tiling + EXEC_KERNEL_CMD 启动
 ├── op_kernel/
 │   └── <op_name>.cpp        # Device 端: CopyIn → Compute → CopyOut
-└── utils/
-    └── kernel_common.h      # 公共工具 (CopyTiling 等)
+└── utils/                   # 固定工具文件（从模板复制，不生成）
+    ├── torch_kernel_helper.h   # EXEC_KERNEL_CMD 宏
+    └── torch_aclnn_helper.h    # EXEC_NPU_CMD 宏
 ```
 
 ## Skill 参考资料
@@ -128,13 +129,19 @@ AscendC::DataCopyPad(yGm[...], yLocal, copyOutParams);
 
 ### 阶段 3: 生成 op_host/<op_name>.cpp
 
-**Host 端关键模式**:
+**Host 端关键模式**（参考 helloworld 模板，使用 EXEC_KERNEL_CMD 启动 kernel）：
 
 ```cpp
+#include "torch_kernel_helper.h"       // EXEC_KERNEL_CMD 宏
 #include "tiling/platform/platform_ascendc.h"
+#include "aclrtlaunch_<kernel_func>.h"  // cmake 自动生成，每个 kernel 入口一个
 
-auto ascendc_platform = platform_ascendc::PlatformAscendCManager::GetInstance();
-int64_t coreNum = static_cast<int64_t>(ascendc_platform->GetCoreNumAiv());
+namespace ascend_kernel {
+at::Tensor <op_name>(args) {
+    // 输入校验
+    // 创建输出 tensor
+    auto ascendc_platform = platform_ascendc::PlatformAscendCManager::GetInstance();
+    int64_t coreNum = static_cast<int64_t>(ascendc_platform->GetCoreNumAiv());
 uint64_t ubSize;
 ascendc_platform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
 ```
@@ -143,6 +150,8 @@ ascendc_platform->GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
 1. Block 级: Cache Line 512B 对齐，formerNum/formerLength/tailNum/tailLength
 2. UB 级: `bufferCoefficient` 从 UB 分配表推导，32B 对齐
 3. `EXEC_KERNEL_CMD(<op_name>, blockDim, self, output, formerNum, formerLength, tailLength, tileLength, dtypeSize)`
+
+**EXEC_KERNEL_CMD 硬约束**：所有参数必须是**左值**（具名变量），禁止传入临时变量/右值/字面量。`double` 先转 `float` 局部变量，`bool` 用 `int64_t` 替代，表达式先赋给局部变量再传入。
 
 ### 阶段 4: 生成框架适配文件
 
@@ -153,8 +162,12 @@ at::Tensor <op_name>(<参数列表>);
 } // namespace ascend_kernel
 ```
 
-#### 4.2 `register.cpp`
+#### 4.2 `register.cpp`（仅含注册，不含 host 逻辑）
+
 ```cpp
+#include "ops.h"
+#include <torch/library.h>
+
 TORCH_LIBRARY_FRAGMENT(npu, m) {
     m.def("<op_name>(<schema>) -> Tensor");
 }

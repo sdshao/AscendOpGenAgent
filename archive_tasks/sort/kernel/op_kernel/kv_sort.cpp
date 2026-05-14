@@ -5,7 +5,7 @@
 using namespace AscendC;
 using namespace KvSort;
 
-extern "C" __global__ __aicore__ void kv_sort_kernel(
+extern "C" __global__ __aicore__ void kv_sort(
     GM_ADDR keys, GM_ADDR values, GM_ADDR sortedKeys, GM_ADDR sortedValues,
     GM_ADDR workspace, GM_ADDR tiling)
 {
@@ -48,18 +48,4 @@ extern "C" __global__ __aicore__ void kv_sort_kernel(
         op.Process();
         pipe.Destroy();
     }
-}
-
-extern "C" void kv_sort_do(
-    uint32_t blockDim,
-    void* stream,
-    uint8_t* keys,
-    uint8_t* values,
-    uint8_t* sortedKeys,
-    uint8_t* sortedValues,
-    uint8_t* workspace,
-    uint8_t* tiling)
-{
-    kv_sort_kernel<<<blockDim, nullptr, stream>>>(
-        keys, values, sortedKeys, sortedValues, workspace, tiling);
 }
